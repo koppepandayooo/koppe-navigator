@@ -1,0 +1,9 @@
+# スクレイパーのログなど
+tools/*.log
+__pycache__/
+*.pyc
+.DS_Store
+Thumbs.db
+
+# Claude Code のローカル設定
+.claude/
