@@ -308,12 +308,46 @@ function drawPins() {
   pin(places.to, '#c62828');
 }
 
-function addViaField(place) {
+// 経由地・目的地の左の 🛵/🚶: その地点まで原付で行くか歩くか。歩きの区間は最後にまとめる（原付を停めてから歩く）
+function modeButton(mode = 'moped') {
+  const b = el('button', { className: 'mode', type: 'button' });
+  setMode(b, mode);
+  b.onclick = () => {
+    setMode(b, b.dataset.mode === 'walk' ? 'moped' : 'walk');
+    if (places.to) planRoute();
+  };
+  return b;
+}
+function setMode(b, mode) {
+  b.dataset.mode = mode;
+  b.textContent = mode === 'walk' ? '🚶' : '🛵';
+  b.title = mode === 'walk' ? 'ここまで歩く（押すと原付に）' : 'ここまで原付（押すと歩きに）';
+  b.classList.toggle('walk', mode === 'walk');
+}
+$('#mode-to').onclick = () => {
+  const b = $('#mode-to');
+  setMode(b, b.dataset.mode === 'walk' ? 'moped' : 'walk');
+  if (places.to) planRoute();
+};
+setMode($('#mode-to'), 'moped');
+// 地点と区間の行き方をまとめる。ride: 原付で行く地点（最後が原付を停める所）、walk: その後に歩いて行く地点
+function tripPlan() {
+  const rows = [...$('#vias').children];
+  const stops = places.vias.map((p, i) => p && { p, mode: rows[i]?.querySelector('.mode')?.dataset.mode || 'moped' }).filter(Boolean);
+  if (places.to) stops.push({ p: places.to, mode: $('#mode-to').dataset.mode });
+  const k = stops.findIndex((x) => x.mode === 'walk');
+  if (k < 0) return { ride: stops.map((x) => x.p), walk: null };
+  if (k === 0) return { error: '出発地から歩くルートはまだ作れません。最初の区間は 🛵 にしてください' };
+  if (stops.slice(k).some((x) => x.mode !== 'walk')) return { error: '歩いた後にまた原付に乗るルートはまだ作れません。🚶 の区間は最後にまとめてください' };
+  return { ride: stops.slice(0, k).map((x) => x.p), walk: stops.slice(k).map((x) => x.p) };
+}
+
+function addViaField(place, mode = 'moped') {
   const i = places.vias.length;
   places.vias.push(place ? { ...place } : null);
   const input = el('input', { placeholder: '経由地を検索', autocomplete: 'off' });
   const rm = el('button', { className: 'rm', type: 'button', textContent: '✕', ariaLabel: '経由地を削除' });
-  const row = el('div', { className: 'field' }, el('span', { className: 'dot via' }), input, rm);
+  const row = el('div', { className: 'field' }, el('span', { className: 'dot via' }), modeButton(mode), input, rm);
   $('#vias').append(row);
   bindSearch(input, () => [...$('#vias').children].indexOf(row));
   rm.onclick = () => { places.vias.splice([...$('#vias').children].indexOf(row), 1); row.remove(); drawPins(); };
@@ -763,8 +797,13 @@ async function planRoute(opts = {}) {
   const start = start0 && opts.startPublicOnly ? { ...start0, publicOnly: true } : start0;
   if (!start) return toast(me?.rough ? `現在地の誤差が大きい（約${fmtDist(me.acc)}）ので、出発地を入力してください` : '出発地が決まっていません（現在地を取得中）', 5000);
   if (!places.to) return toast('目的地を入れてください');
-  const goal = places.park || places.to; // 駐車場を選んだら原付はそこまで
-  const locs = [start, ...(opts.start ? opts.remainingVias || [] : places.vias.filter(Boolean)), goal];
+  // 🚶 の区間があれば、原付はその手前の地点まで（そこで停めて歩く）。なければ駐車場を選んでいればそこまで
+  const plan = tripPlan();
+  if (plan.error) return toast(plan.error, 6000);
+  walkPlan = plan.walk;
+  const rideVias = plan.ride.slice(0, -1);
+  const goal = plan.walk ? plan.ride.at(-1) : places.park || places.to;
+  const locs = [start, ...(opts.start ? opts.remainingVias || [] : rideVias), goal];
   const my = ++planSeq;
   if (!opts.quiet) toast('ルート検索中…', 10000);
   await regReady;
@@ -836,7 +875,7 @@ async function planRoute(opts = {}) {
     if (my !== planSeq) return;
     candidates = pick(routes);
     // 目的地の手前が長い管理用道路・林道（山頂など）なら、一般道の終わりまでにして残りは徒歩
-    if (!places.park && !places.to.publicOnly && (candidates[0].serviceTail || 0) > 0.7 && !opts.start) {
+    if (!walkPlan && !places.park && !places.to.publicOnly && (candidates[0].serviceTail || 0) > 0.7 && !opts.start) {
       places.to.publicOnly = true;
       places.to.walkReason = 'service';
       return planRoute({ ...opts, quiet: true });
@@ -1022,22 +1061,26 @@ const ICONS = { 1: '●', 2: '●', 3: '●', 4: '🏁', 5: '🏁', 6: '🏁', 8
 // 原付のルートの終点（原付を停める所）が目的地から離れているときは、そこから目的地までの歩きのルートを出す
 const WALK_MIN = 40;          // これより近ければ歩きのルートは出さない（m）
 const walkCache = new Map();
+let walkPlan = null; // 🚶 で行く地点（planRoute が決める）。null なら「原付で入れない目的地だけ歩く」
 async function walkRoute(route) {
   if (!places.to) return null;
-  const end = route.shape.at(-1), dest = [places.to.lat, places.to.lon];
-  const straight = haversine(end, dest);
-  if (straight <= WALK_MIN) return null;
-  const key = `${end[0].toFixed(5)},${end[1].toFixed(5)}>${dest[0].toFixed(5)},${dest[1].toFixed(5)}`;
+  const end = route.shape.at(-1);
+  const stops = (walkPlan || [places.to]).map((x) => [x.lat, x.lon]);
+  // 🚶 を選んでいないときは、原付の終点が目的地から離れているときだけ歩く
+  if (!walkPlan && haversine(end, stops[0]) <= WALK_MIN) return null;
+  const pts = [end, ...stops];
+  const key = pts.map((q) => `${q[0].toFixed(5)},${q[1].toFixed(5)}`).join('>');
   if (!walkCache.has(key)) {
     walkCache.set(key, valhalla('/route', {
-      locations: [{ lat: end[0], lon: end[1] }, { lat: dest[0], lon: dest[1] }],
+      locations: pts.map(([lat, lon]) => ({ lat, lon, type: 'break' })),
       costing: 'pedestrian', directions_options: { language: 'ja-JP', units: 'kilometers' },
     }).then((res) => Object.assign(prepareTrip(res.trip), { straight: false }))
       // 歩く道も見つからない（地図に道がない場所など）ときは直線で
-      .catch(() => ({
-        straight: true, shape: [end, dest], trip: { summary: { length: straight / 1000, time: straight / 1.2 } },
-        legs: [{ shape: [end, dest], cum: [0, straight], maneuvers: [] }],
-      })));
+      .catch(() => {
+        const legs = pts.slice(1).map((q, i) => ({ shape: [pts[i], q], cum: [0, haversine(pts[i], q)], maneuvers: [] }));
+        const len = legs.reduce((n, L) => n + L.cum[1], 0);
+        return { straight: true, shape: pts, trip: { summary: { length: len / 1000, time: len / 1.2 } }, legs };
+      }));
   }
   return walkCache.get(key);
 }
@@ -1277,7 +1320,8 @@ function renderSheet(sel) {
   const walk = places.to ? haversine(end, [places.to.lat, places.to.lon]) : 0;
   const startWalk = places.from?.publicOnly ? haversine(current.shape[0], [places.from.lat, places.from.lon]) : 0;
   const W = current.walk;
-  const reason = WALK_REASON[places.to?.walkReason] ? `<br><small>${WALK_REASON[places.to.walkReason]}</small>` : '';
+  // 自分で 🚶 を選んだときは理由を出さない（自動で歩きにしたときだけ）
+  const reason = !walkPlan && WALK_REASON[places.to?.walkReason] ? `<br><small>${WALK_REASON[places.to.walkReason]}</small>` : '';
   $('#summary').innerHTML = (W
     ? `${fmtTime(s.time + W.trip.summary.time)}<small>原付 ${fmtTime(s.time)}（${fmtDist(s.length * 1000)}）＋ 徒歩 ${fmtTime(W.trip.summary.time)}</small>`
     : `${fmtTime(s.time)}<small>${fmtDist(s.length * 1000)} ・ 曲がる${current.turns}回 ・ ${settings.speed}km/h想定</small>`)
@@ -1333,13 +1377,14 @@ function renderSheet(sel) {
   }));
   if (W) {
     steps.push(el('li', { className: 'step-sep', textContent: `🚶 ここから徒歩（${fmtDist(W.trip.summary.length * 1000)}）` }));
-    const WL = W.legs[0];
-    if (!WL.maneuvers.length) steps.push(el('li', { className: 'walkstep', innerHTML: '<span class="ico">🚶</span><span class="txt">目的地まで歩きます（直線）</span>' }));
-    WL.maneuvers.forEach((m) => {
-      const li = el('li', { className: 'walkstep' });
-      li.innerHTML = `<span class="ico">${ICONS[m.type] || '•'}</span><span class="txt">${esc(m.instruction)}<br><span class="d">${m.length ? fmtDist(m.length * 1000) : ''}</span></span>`;
-      li.onclick = () => flyTo(WL.shape[m.begin_shape_index], 18);
-      steps.push(li);
+    W.legs.forEach((WL, wi) => {
+      if (!WL.maneuvers.length) steps.push(el('li', { className: 'walkstep', innerHTML: `<span class="ico">🚶</span><span class="txt">${wi < W.legs.length - 1 ? '経由地' : '目的地'}まで歩きます（直線）</span>` }));
+      WL.maneuvers.forEach((m) => {
+        const li = el('li', { className: 'walkstep' });
+        li.innerHTML = `<span class="ico">${ICONS[m.type] || '•'}</span><span class="txt">${esc(m.instruction)}<br><span class="d">${m.length ? fmtDist(m.length * 1000) : ''}</span></span>`;
+        li.onclick = () => flyTo(WL.shape[m.begin_shape_index], 18);
+        steps.push(li);
+      });
     });
   }
   $('#steps').replaceChildren(...steps);
@@ -1449,7 +1494,7 @@ function navUpdate(p) {
   $('#nav-speed').classList.toggle('over', settings.vehicle === '1' && kmh != null && kmh > 30);
 
   // 歩きに切り替えた後は、歩きのルートを案内する
-  const L = nav.walking ? current.walk.legs[0] : current.legs[nav.legIdx];
+  const L = nav.walking ? current.walk.legs[nav.wLeg] : current.legs[nav.legIdx];
   const pt = [p.lat, p.lon];
   // 直前の位置の近くから探す（逆走や並行道路での誤スナップを減らす）
   let near = nearestOnLine(pt, L.shape, nav.lastIdx - 5, nav.lastIdx + 400);
@@ -1498,7 +1543,7 @@ function navUpdate(p) {
   const regAhead = !nav.walking && current.hits.find((h) => h.passes && h.active && h.idx > near.i && h.idx - near.i < 200);
   $('#nav-warn').textContent = [nav.paused, two, regAhead ? '⛔ この先 原付通行規制区間' : ''].filter(Boolean).join(' / ');
 
-  const key = `${nav.walking ? 'w' : nav.legIdx}-${nav.mIdx + 1}`;
+  const key = `${nav.walking ? 'w' + nav.wLeg : nav.legIdx}-${nav.mIdx + 1}`;
   if (dNext < 300 && dNext > 80 && !nav.spoken.has(key + 'a')) {
     nav.spoken.add(key + 'a');
     const m = Math.round(dNext / 50) * 50;
@@ -1517,6 +1562,8 @@ function navUpdate(p) {
   if (!nav.walking) {
     for (let k = nav.legIdx + 1; k < current.legs.length; k++) { remain += current.legs[k].cum.at(-1); remainT += current.legs[k].leg.summary.time; }
     if (current.walk) { remain += current.walk.trip.summary.length * 1000; remainT += current.walk.trip.summary.time; }
+  } else {
+    for (let k = nav.wLeg + 1; k < current.walk.legs.length; k++) { const d = current.walk.legs[k].cum.at(-1); remain += d; remainT += d / walkSpeed; }
   }
   const eta = new Date(Date.now() + remainT * 1000);
   $('#nav-remain').innerHTML = `<b>${fmtDist(remain)}</b> ・ ${fmtTime(remainT)}<br><small>到着 ${eta.getHours()}:${String(eta.getMinutes()).padStart(2, '0')}頃</small>`;
@@ -1525,12 +1572,14 @@ function navUpdate(p) {
   if (L.cum.at(-1) - along < (nav.walking ? 15 : 30)) {
     if (!nav.walking && nav.legIdx < current.legs.length - 1) {
       speak('経由地に到着しました', ['via']); nav.legIdx++; nav.mIdx = 0; nav.lastIdx = 0;
+    } else if (nav.walking && nav.wLeg < current.walk.legs.length - 1) {
+      speak('経由地に到着しました', ['via']); nav.wLeg++; nav.mIdx = 0; nav.lastIdx = 0;
     } else if (!nav.walking && current.walk) {
       // 原付を停める場所に着いた → 歩きのナビに切り替える
       const wt = current.walk.trip.summary.time;
       speak(`ここで原付を停めて、ここから歩きます。目的地まで歩いて約${fmtTime(wt)}です`, ['park']);
       toast(`🅿 ここで原付を停めて、歩いて約${fmtTime(wt)}`, 6000);
-      Object.assign(nav, { walking: true, mIdx: 0, lastIdx: 0, spoken: new Set() });
+      Object.assign(nav, { walking: true, wLeg: 0, mIdx: 0, lastIdx: 0, spoken: new Set() });
       document.body.classList.add('walking');
       return navUpdate(p); // すぐ歩きの案内を出す
     } else { speak('目的地に到着しました。おつかれさまでした', ['arrive']); toast('到着しました'); endNav(true); return; }
@@ -1550,7 +1599,7 @@ async function reroute(p) {
   nav.rerouting = true;
   toast('ルートを再検索中…');
   speak('ルートを再検索します', ['reroute']);
-  const remainingVias = places.vias.filter(Boolean).slice(nav.legIdx);
+  const remainingVias = (tripPlan().ride || []).slice(0, -1).slice(nav.legIdx); // 原付で行く経由地のうち、まだのもの
   planRoute.lastError = null;
   const r = await planRoute({ start: { lat: p.lat, lon: p.lon, name: '現在地', heading: nav.heading }, remainingVias, quiet: true, keepView: true });
   if (r) Object.assign(nav, { legIdx: 0, mIdx: 0, lastIdx: 0, offCount: 0, spoken: new Set(), fails: 0, retryAt: 0, paused: '' });
@@ -1585,7 +1634,8 @@ const pipeBytes = async (bytes, stream) => new Uint8Array(await new Response(new
 
 async function shareUrl() {
   const data = {
-    v: 1, f: packPlace(places.from), w: places.vias.filter(Boolean).map(packPlace), t: packPlace(places.to), ...(places.park ? { pk: packPlace(places.park) } : {}),
+    v: 1, f: packPlace(places.from), w: places.vias.filter(Boolean).map(packPlace), t: packPlace(places.to),
+    md: [...[...$('#vias').children].filter((r, i) => places.vias[i]).map((r) => r.querySelector('.mode').dataset.mode), $('#mode-to').dataset.mode].map((m) => m === 'walk' ? 1 : 0), ...(places.park ? { pk: packPlace(places.park) } : {}),
     s: Object.fromEntries(SHARE_KEYS.map((k) => [k, settings[k]])), x: excluded,
     k: current && { len: +current.trip.summary.length.toFixed(2), turns: current.turns },
   };
@@ -1635,7 +1685,8 @@ async function receiveShared() {
   save('settings', settings);
   drawRegulations();
   setPlace('from', unpackPlace(data.f), $('#from'));
-  for (const v of data.w || []) addViaField(unpackPlace(v));
+  (data.w || []).forEach((v, i) => addViaField(unpackPlace(v), data.md?.[i] ? 'walk' : 'moped'));
+  setMode($('#mode-to'), data.md?.[(data.w || []).length] ? 'walk' : 'moped');
   setPlace('to', unpackPlace(data.t), $('#to'));
   if (data.pk) setPark(unpackPlace(data.pk), false);
   excluded = data.x || [];

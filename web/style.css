@@ -189,3 +189,8 @@ body.walking #nav-top { background: #1e6fd9; color: #fff; }
 .walk .act { margin-left: 6px; font-size: 12px; padding: 2px 8px; }
 .park-acts { display: flex; gap: 6px; flex: none; }
 a.act.sv-btn { display: inline-flex; align-items: center; text-decoration: none; color: inherit; border: 1px solid var(--line); border-radius: 8px; padding: 4px 10px; font-size: 13px; }
+
+/* 区間の行き方（🛵 原付 / 🚶 歩き） */
+.field .mode { border: 1px solid var(--line); border-radius: 8px; padding: 2px 6px; font-size: 16px; line-height: 1.2; background: var(--bg); flex: none; }
+.field .mode.walk { border-color: #1e6fd9; background: #e8f1fd; }
+:root[data-theme=dark] .field .mode.walk { background: #1b3352; border-color: #7ab8ff; }
