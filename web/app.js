@@ -49,7 +49,14 @@ function setOverlay(name, data) {
   overlay[name] = data;
   map.getSource(name)?.setData(data);
 }
+// 歩いているときだけ、店・寺社・公園などの名前を出す
+var poiOn = false; // var: スタイルの読み込み（addOverlays）から先に呼ばれても使えるように
+function setPoiVisible(on) {
+  poiOn = on;
+  for (const l of map.getStyle()?.layers || []) if (/^poi_r/.test(l.id)) map.setLayoutProperty(l.id, 'visibility', on ? 'visible' : 'none');
+}
 function addOverlays() {
+  setPoiVisible(poiOn); // スタイルを読み直したとき（昼夜の切り替えなど）も今の状態に
   for (const [name, data] of Object.entries(overlay)) if (!map.getSource(name)) map.addSource(name, { type: 'geojson', data });
   const regVis = settings.showReg ? 'visible' : 'none';
   const regColor = ['case', ['get', 'active'], '#d32f2f', '#e57373'];
@@ -187,8 +194,9 @@ async function loadBaseStyle() {
   const my = ++baseStyleSeq;
   if (!styleCache[name]) {
     const style = await fetch('https://tiles.openfreemap.org/styles/liberty').then((r) => r.json());
-    // 店などのアイコンと 3D の建物は消す（走行中に見やすいように）
-    style.layers = style.layers.filter((l) => !/^poi_r/.test(l.id) && l.type !== 'fill-extrusion');
+    // 3D の建物は消す。店・寺社・公園などの名前とアイコン（poi_r…）は、原付のときは隠して、歩くときだけ出す（目印になるので）
+    style.layers = style.layers.filter((l) => l.type !== 'fill-extrusion');
+    for (const l of style.layers) if (/^poi_r/.test(l.id)) (l.layout ??= {}).visibility = 'none';
     // 道路番号の標識は間隔をあけて数を減らす
     for (const l of style.layers) if (/shield/.test(l.id)) Object.assign(l.layout, { 'symbol-spacing': 700 });
     for (const l of style.layers) {
@@ -1496,6 +1504,7 @@ document.addEventListener('visibilitychange', async () => {
 function endNav(keepVoice = false) {
   nav.on = false;
   document.body.classList.remove('navigating', 'walking');
+  setPoiVisible(false);
   nav.walking = false;
   $('#nav-top').hidden = $('#nav-bottom').hidden = true;
   nav.wake?.release?.(); nav.wake = null;
@@ -1600,6 +1609,7 @@ function navUpdate(p) {
       toast(`🅿 ここで原付を停めて、歩いて約${fmtTime(wt)}`, 6000);
       Object.assign(nav, { walking: true, wLeg: 0, mIdx: 0, lastIdx: 0, spoken: new Set() });
       document.body.classList.add('walking');
+      setPoiVisible(true);
       return navUpdate(p); // すぐ歩きの案内を出す
     } else { speak('目的地に到着しました。おつかれさまでした', ['arrive']); toast('到着しました'); endNav(true); return; }
   }
@@ -1610,8 +1620,8 @@ function navUpdate(p) {
   let heading = haversine(pt, ahead) > 3 ? bearing(pt, ahead) : map.getBearing();
   if (p.speed > 2 && p.heading != null && !Number.isNaN(p.heading) && near.d > 25) heading = p.heading;
   meMarker?.setRotation(heading);
-  // 歩くときは近くを大きく
-  map.easeTo({ center: ll(pt), bearing: heading, pitch: nav.walking ? 30 : 45, zoom: nav.walking ? 18 : 17, padding: { top: innerHeight * 0.45, bottom: 90, left: 0, right: 0 }, duration: 900 });
+  // 歩くときは平らにして少し引く（周りの名前や目印が見えるように）
+  map.easeTo({ center: ll(pt), bearing: heading, pitch: nav.walking ? 0 : 45, zoom: nav.walking ? 17 : 17, padding: { top: nav.walking ? innerHeight * 0.3 : innerHeight * 0.45, bottom: 90, left: 0, right: 0 }, duration: 900 });
 }
 
 async function reroute(p) {
