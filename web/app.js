@@ -333,6 +333,9 @@ setMode($('#mode-to'), 'moped');
 // 地点と区間の行き方をまとめる。ride: 原付で行く地点（最後が原付を停める所）、walk: その後に歩いて行く地点
 function tripPlan() {
   const rows = [...$('#vias').children];
+  // 文字は入っているのに候補から選ばれていない経由地（その経由地が無いことになり、行き方がずれる）
+  const loose = rows.find((r, i) => !places.vias[i] && r.querySelector('input').value.trim());
+  if (loose) return { error: `経由地「${loose.querySelector('input').value.trim()}」がまだ決まっていません。入力欄を押して候補から選んでください`, input: loose.querySelector('input') };
   const stops = places.vias.map((p, i) => p && { p, mode: rows[i]?.querySelector('.mode')?.dataset.mode || 'moped' }).filter(Boolean);
   if (places.to) stops.push({ p: places.to, mode: $('#mode-to').dataset.mode });
   const k = stops.findIndex((x) => x.mode === 'walk');
@@ -804,7 +807,7 @@ async function planRoute(opts = {}) {
   if (!places.to) return toast('目的地を入れてください');
   // 🚶 の区間があれば、原付はその手前の地点まで（そこで停めて歩く）。なければ駐車場を選んでいればそこまで
   const plan = tripPlan();
-  if (plan.error) return toast(plan.error, 6000);
+  if (plan.error) { plan.input?.focus(); return toast(plan.error, 6000); }
   walkPlan = plan.walk;
   const rideVias = plan.ride.slice(0, -1);
   const goal = plan.walk ? plan.ride.at(-1) : places.park || places.to;
