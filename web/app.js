@@ -7,7 +7,7 @@ const GSI_SEARCH = 'https://msearch.gsi.go.jp/address-search/AddressSearch';
 const NOMINATIM_REVERSE = 'https://nominatim.openstreetmap.org/reverse';
 
 // ===== 設定 =====
-const DEFAULTS = { theme: 'auto', vehicle: '1', speed: 30, primary: '0.5', hills: '0.5', turns: '0', avoidReg: true, avoidTwoStage: true, voice: true, voiceType: 'zundamon', showReg: true };
+const DEFAULTS = { theme: 'auto', vehicle: '1', speed: 30, primary: '0.15', hills: '0.5', turns: '0', avoidReg: true, avoidTwoStage: true, voice: true, voiceType: 'zundamon', showReg: true };
 const settings = Object.assign({}, DEFAULTS, load('settings', {}));
 function load(k, d) { try { return JSON.parse(localStorage.getItem('gt.' + k)) ?? d; } catch { return d; } }
 function save(k, v) { try { localStorage.setItem('gt.' + k, JSON.stringify(v)); } catch {} }
@@ -785,12 +785,17 @@ function routeRequest(locs, exclude, variant = {}) {
       ...((i > 0 && p.noVehicle) || p.publicOnly ? { search_filter: { exclude_tunnel: i > 0 && !!p.noVehicle, ...(p.publicOnly ? { min_road_class: 'residential' } : {}) } } : {}),
     })),
     costing: 'motor_scooter',
-    costing_options: { motor_scooter: { top_speed: speed, use_primary: variant.use_primary ?? +settings.primary, ...(variant.maneuver_penalty ? { maneuver_penalty: variant.maneuver_penalty } : {}), use_hills: +settings.hills, use_ferry: 0.3 } },
+    costing_options: { motor_scooter: { top_speed: speed, use_primary: variant.use_primary ?? +settings.primary, ...(variant.maneuver_penalty ? { maneuver_penalty: variant.maneuver_penalty } : {}), ...(variant.shortest ? { shortest: true } : {}), use_hills: +settings.hills, use_ferry: 0.3 } },
     exclude_polygons: exclude,
     directions_options: { language: 'ja-JP', units: 'kilometers' },
     alternates: locs.length === 2 ? 2 : 0,
   };
 }
+
+// 設定「大通り: なるべく避ける」のとき。Valhalla の use_primary は国道クラスにしか効かないので、
+// 県道クラスも含めて大通りを走る距離を数えて、多いルートを不利にする（秒/km）
+const avoidBig = () => +settings.primary <= 0.2;
+const bigRoadPenalty = (r) => avoidBig() && r.bigKm ? 150 * r.bigKm.main + 90 * r.bigKm.sub : 0;
 
 async function planRoute(opts = {}) {
   const start0 = opts.start || startPlace();
@@ -865,12 +870,17 @@ async function planRoute(opts = {}) {
   // 低いほど良い: 所要時間(秒) + 二段階右折1回あたり2分 + 曲がる回数（設定） + 通行規制区間の通過は大きく減点
   // 解析に失敗したルート（二段階右折の数が不明）は少し不利にする
   const score = (r) => r.trip.summary.time
+    + bigRoadPenalty(r)
     + (avoidTwo ? (r.analyzed ? 120 * r.twoStage.length : 300) : 0)
     + +settings.turns * r.turns
     + 1800 * r.hits.filter((h) => h.passes && h.active).length;
   try {
     // 曲がる回数を減らしたいときは「大通りを通しで使う案」も出して比べる
-    const routes = await request(+settings.turns ? [{}, { use_primary: 0.9, maneuver_penalty: 120 }] : [{}]);
+    // 大通りを避けたいときは「大通りを強く避けた案」と「距離が一番短い案」（細い道を通りやすい）も出して比べる
+    const variants = [{}];
+    if (+settings.turns) variants.push({ use_primary: 0.9, maneuver_penalty: 120 });
+    if (avoidBig()) variants.push({ use_primary: 0.02 }, { shortest: true });
+    const routes = await request(variants);
     if (!routes.length) throw new Error('no route');
     if (my !== planSeq) return;
     candidates = pick(routes);
@@ -960,6 +970,7 @@ const traceCache = new Map();
 async function analyze(route) {
   if (traceCache.size > 60) traceCache.clear();
   route.twoStage = [];
+  route.bigKm = { main: 0, sub: 0 }; // 大通りを走る距離（main: 国道クラス trunk/primary、sub: 県道クラス secondary）
   route.structure = new Array(route.shape.length).fill(null); // 各点が トンネル/橋 の上か
   let traceOk = true;
   for (const L of route.legs) {
@@ -967,7 +978,7 @@ async function analyze(route) {
     try {
       const j = traceCache.get(L.leg.shape) || await valhalla('/trace_attributes', {
         encoded_polyline: L.leg.shape, shape_match: 'edge_walk', costing: 'motor_scooter',
-        filters: { attributes: ['edge.lane_count', 'edge.names', 'edge.begin_shape_index', 'edge.end_shape_index', 'edge.use', 'edge.tunnel', 'edge.bridge', 'edge.length'], action: 'include' },
+        filters: { attributes: ['edge.lane_count', 'edge.names', 'edge.begin_shape_index', 'edge.end_shape_index', 'edge.use', 'edge.tunnel', 'edge.bridge', 'edge.length', 'edge.road_class'], action: 'include' },
       });
       traceCache.set(L.leg.shape, j);
       edges = j.edges || [];
@@ -976,6 +987,10 @@ async function analyze(route) {
     if (L === route.legs.at(-1)) {
       route.serviceTail = 0;
       for (let k = edges.length - 1; k >= 0 && /^(service_road|track|parking_aisle|driveway|alley)$/.test(edges[k].use); k--) route.serviceTail += edges[k].length || 0;
+    }
+    for (const e of edges) {
+      if (/^(trunk|primary)$/.test(e.road_class)) route.bigKm.main += e.length || 0;
+      else if (e.road_class === 'secondary') route.bigKm.sub += e.length || 0;
     }
     for (const e of edges) {
       if (!e.tunnel && !e.bridge) continue;
@@ -1311,7 +1326,8 @@ map.on('mouseleave', 'alts', () => (map.getCanvas().style.cursor = ''));
 function renderSheet(sel) {
   const s = current.trip.summary;
   $('#alts').replaceChildren(...(candidates.length > 1 ? candidates.map((c, j) => {
-    const b = el('button', { className: j === sel ? 'sel' : '', textContent: `ルート${j + 1}  ${fmtTime(c.trip.summary.time)}・曲がる${c.turns}回${settings.vehicle === '1' ? `・二段階${c.analyzed ? c.twoStage.length : '?'}` : ''}` });
+    const big = c.bigKm ? c.bigKm.main + c.bigKm.sub : null;
+    const b = el('button', { className: j === sel ? 'sel' : '', textContent: `ルート${j + 1}  ${fmtTime(c.trip.summary.time)}・曲がる${c.turns}回${settings.vehicle === '1' ? `・二段階${c.analyzed ? c.twoStage.length : '?'}` : ''}${big != null && c.analyzed ? `・大通り${big.toFixed(1)}km` : ''}` });
     b.onclick = () => selectRoute(j, false);
     return b;
   }) : []));

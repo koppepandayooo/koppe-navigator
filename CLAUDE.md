@@ -46,7 +46,8 @@
 6. **ずんだもんの声**: `speak(text, ids)`。ids の音声が全部あればずんだもんの音声をつないで流し（Web Audio）、なければ text を端末の声で読む。道路名などは入れない（決まり文句だけ）。音を出す準備 `unlockVoice()` はナビ開始のタップ直後（await より前）に呼ぶ。設定画面に「VOICEVOX:ずんだもん」の表記が必要（利用規約）
    - クラウドの作業環境でも VOICEVOX エンジンは動かせる: GitHub のリリース（`voicevox_engine-linux-cpu-x64-<版>.7z.001`）は直接ダウンロードでき、py7zr で展開して `./run` で起動
 7. **スマホに送る**: 地点と設定を URL の `#r=` に詰めて（deflate＋base64url）QR コードに。スマホは `receiveShared()` で読んで同じ条件で再検索し、距離と曲がる回数が近い候補を選ぶ。QR は qrcode-generator を CDN から必要なときだけ読む
-8. **曲がる回数**: `TURNS`（右左折・U ターン）を数え、設定 `turns`（秒/回）を点数に足す。0 以外なら `use_primary: 0.9, maneuver_penalty: 120` の案も出す（Valhalla の設定だけでは回数はほぼ減らない）
+8. **大通りを避ける**（設定「大通り: なるべく避ける」= `use_primary` 0.15 以下、初期設定）: Valhalla の `use_primary` は国道クラス（trunk/primary）にしか効かず、県道クラスや少し速いだけの大通りを選んでしまう（「大通りを通らなくていい所を通る」と不評だった）。なので `{ use_primary: 0.02 }` と `{ shortest: true }`（距離最短は細い道を通りやすい）の案も出し、`/trace_attributes` の `road_class` で大通りの距離（`bigKm.main` 国道クラス・`bigKm.sub` 県道クラス）を数えて `bigRoadPenalty()`（150 秒/km・90 秒/km）を点数に足す。候補ボタンに「大通り ○km」
+9. **曲がる回数**: `TURNS`（右左折・U ターン）を数え、設定 `turns`（秒/回）を点数に足す。0 以外なら `use_primary: 0.9, maneuver_penalty: 120` の案も出す（Valhalla の設定だけでは回数はほぼ減らない）
 
 ## ユーザーの好み・これまでの判断
 
