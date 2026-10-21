@@ -1440,10 +1440,27 @@ const setAudioSession = (type) => { try { if (navigator.audioSession) navigator.
 let duckTimer = null;
 function duckOthers() { clearTimeout(duckTimer); setAudioSession('transient'); }
 function unduckOthers() { clearTimeout(duckTimer); duckTimer = setTimeout(() => setAudioSession('ambient'), 400); }
+// Android の Chrome は、<audio> で 5 秒より短い音を鳴らすときだけ「少しの間ほかのアプリの音を小さくして」と OS に頼む。
+// Web Audio はこの対象外で、音楽に重なってしまう。なので Android では <audio> で 1 つずつ流す
+const isAndroid = /Android/i.test(navigator.userAgent);
+function playClip(file) {
+  return new Promise((res) => {
+    const a = zunda.el;
+    a.onended = a.onerror = () => res();
+    a.src = 'voice/zundamon/' + file;
+    a.play().catch(() => res());
+  });
+}
 // ナビ開始のタップの中で呼ぶ（スマホはユーザー操作がないと音を出せない）
 function unlockVoice() {
   setAudioSession('ambient');
   if (settings.voiceType !== 'zundamon' || !zunda.index) return;
+  if (isAndroid && !zunda.el) {
+    // タップの中で一度鳴らして（音は消して）おくと、あとから声を流せる
+    zunda.el = new Audio();
+    const first = Object.values(zunda.index)[0];
+    if (first) { zunda.el.muted = true; zunda.el.src = 'voice/zundamon/' + first.file; zunda.el.play().then(() => { zunda.el.pause(); zunda.el.muted = false; }).catch(() => { zunda.el.muted = false; }); }
+  }
   zunda.ctx ??= new (window.AudioContext || window.webkitAudioContext)();
   zunda.ctx.resume?.();
   for (const [id, v] of Object.entries(zunda.index)) {
@@ -1451,13 +1468,20 @@ function unlockVoice() {
       .then((a) => new Promise((res, rej) => zunda.ctx.decodeAudioData(a, res, rej))).catch(() => { delete zunda.buf[id]; return null; });
   }
 }
-const canZunda = (ids) => settings.voiceType === 'zundamon' && zunda.ctx && ids?.length && ids.every((id) => id && zunda.buf[id]);
+const canZunda = (ids) => settings.voiceType === 'zundamon' && ids?.length && (zunda.el
+  ? ids.every((id) => id && zunda.index?.[id]) // Android: ファイルがあればよい
+  : zunda.ctx && ids.every((id) => id && zunda.buf[id]));
 // ids: ずんだもんの音声の並び、text: 音声がないとき端末の声で読む文
 function speak(text, ids) {
   if (!settings.voice || !text) return;
   if (canZunda(ids)) {
     zunda.queue = zunda.queue.then(async () => {
       duckOthers();
+      if (zunda.el) {
+        for (const id of ids) { if (!settings.voice) break; await playClip(zunda.index[id].file); }
+        unduckOthers();
+        return;
+      }
       for (const id of ids) {
         const b = await zunda.buf[id];
         if (!b || !settings.voice) break;
@@ -1481,6 +1505,7 @@ function speak(text, ids) {
 function stopVoice() {
   speechSynthesis?.cancel();
   unduckOthers();
+  if (zunda.el) { zunda.el.pause(); zunda.el.onended?.(); }
   zunda.sources.forEach((s) => { try { s.stop(); } catch {} });
   zunda.sources = [];
 }
