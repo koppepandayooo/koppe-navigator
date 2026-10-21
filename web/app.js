@@ -1434,10 +1434,16 @@ const nav = { on: false, legIdx: 0, mIdx: 0, lastIdx: 0, offCount: 0, spoken: ne
 // 音声ファイルがない文・道路名が入る文は端末の読み上げ（speechSynthesis）で読む
 const zunda = { ctx: null, index: null, buf: {}, queue: Promise.resolve(), sources: [] };
 fetch('voice/zundamon/index.json').then((r) => r.ok ? r.json() : null).then((j) => (zunda.index = j)).catch(() => {});
+// iPhone（Safari 16.4 以降）の音の扱い。'playback' は他のアプリの音楽を止めてしまうので使わない。
+// ふだんは 'ambient'（他の音と重ねる）、しゃべる間だけ 'transient'（他のアプリの音を小さくする）にして、終わったら戻す
+const setAudioSession = (type) => { try { if (navigator.audioSession) navigator.audioSession.type = type; } catch {} };
+let duckTimer = null;
+function duckOthers() { clearTimeout(duckTimer); setAudioSession('transient'); }
+function unduckOthers() { clearTimeout(duckTimer); duckTimer = setTimeout(() => setAudioSession('ambient'), 400); }
 // ナビ開始のタップの中で呼ぶ（スマホはユーザー操作がないと音を出せない）
 function unlockVoice() {
+  setAudioSession('ambient');
   if (settings.voiceType !== 'zundamon' || !zunda.index) return;
-  try { if (navigator.audioSession) navigator.audioSession.type = 'playback'; } catch {} // iPhone のマナーモードでも鳴らす
   zunda.ctx ??= new (window.AudioContext || window.webkitAudioContext)();
   zunda.ctx.resume?.();
   for (const [id, v] of Object.entries(zunda.index)) {
@@ -1451,9 +1457,10 @@ function speak(text, ids) {
   if (!settings.voice || !text) return;
   if (canZunda(ids)) {
     zunda.queue = zunda.queue.then(async () => {
+      duckOthers();
       for (const id of ids) {
         const b = await zunda.buf[id];
-        if (!b || !settings.voice) return;
+        if (!b || !settings.voice) break;
         await new Promise((res) => {
           const src = zunda.ctx.createBufferSource();
           src.buffer = b; src.connect(zunda.ctx.destination);
@@ -1461,15 +1468,19 @@ function speak(text, ids) {
           zunda.sources.push(src); src.start();
         });
       }
+      unduckOthers();
     });
     return;
   }
   if (!('speechSynthesis' in window)) return;
   const u = new SpeechSynthesisUtterance(text); u.lang = 'ja-JP'; u.rate = 1.05;
+  u.onstart = duckOthers;
+  u.onend = u.onerror = unduckOthers;
   speechSynthesis.speak(u);
 }
 function stopVoice() {
   speechSynthesis?.cancel();
+  unduckOthers();
   zunda.sources.forEach((s) => { try { s.stop(); } catch {} });
   zunda.sources = [];
 }
